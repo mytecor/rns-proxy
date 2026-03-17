@@ -1,0 +1,8 @@
+[reticulum]
+  enable_transport = Yes
+  share_instance = Yes
+  shared_instance_port = 37428
+  instance_control_port = 37429
+
+[logging]
+  loglevel = 7

@@ -1,0 +1,6 @@
+/target
+/result
+rust-analyzer.log
+*.pem
+.rns-proxy-examples
+/examples/rnsd_config/storage

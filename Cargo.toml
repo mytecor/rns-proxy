@@ -1,0 +1,23 @@
+[package]
+name = "rns-proxy"
+description = "SOCKS5 proxy client & server over Reticulum Network Stack"
+version = "0.1.0"
+license = "MIT"
+edition = "2021"
+
+[[bin]]
+name = "rns-proxy"
+path = "src/main.rs"
+
+[dependencies]
+log = "0.4"
+env_logger = "0.11"
+clap = { version = "4", features = ["derive"] }
+tokio = { version = "1.44", features = ["full"] }
+fast-socks5 = "1.0"
+hex = "0.4"
+
+rns-net = "0.5"
+rns-core = "0.1"
+rns-crypto = "0.1"
+

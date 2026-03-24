@@ -35,12 +35,7 @@ pub struct MuxHandle {
 }
 
 struct MuxInner {
-    /// WORKAROUND(rns-rs#3): Wrapped in Mutex to allow node replacement via
-    /// `replace_node()` when recreating the RnsNode after rnsd restart.
-    /// Revert to plain `Arc<RnsNode>` once rns-rs merges LocalClientInterface
-    /// reconnection support.
-    /// https://github.com/lelloman/rns-rs/issues/3
-    node: Mutex<Arc<RnsNode>>,
+    node: Arc<RnsNode>,
     link_id: Mutex<Option<LinkId>>,
     sessions: Mutex<HashMap<u32, mpsc::UnboundedSender<Frame>>>,
     next_sid: Mutex<u32>,
@@ -53,7 +48,7 @@ impl MuxHandle {
     pub fn new(node: Arc<RnsNode>) -> Self {
         Self {
             inner: Arc::new(MuxInner {
-                node: Mutex::new(node),
+                node,
                 link_id: Mutex::new(None),
                 sessions: Mutex::new(HashMap::new()),
                 next_sid: Mutex::new(0),
@@ -79,18 +74,6 @@ impl MuxHandle {
         *self.inner.link_id.lock().unwrap() = None;
         self.inner.sessions.lock().unwrap().clear();
         self.inner.recv_buf.lock().unwrap().clear();
-    }
-
-    /// Replace the underlying RNS node reference.
-    ///
-    /// Called when the node is recreated (e.g. after rnsd restart).
-    ///
-    /// WORKAROUND(rns-rs#3): This method exists because LocalClientInterface has
-    /// no reconnect logic. Remove (along with the Mutex wrapper on `node`)
-    /// once rns-rs merges the fix.
-    /// https://github.com/lelloman/rns-rs/issues/3
-    pub fn replace_node(&self, node: Arc<RnsNode>) {
-        *self.inner.node.lock().unwrap() = node;
     }
 
     /// Check if link is active.
@@ -132,7 +115,7 @@ impl MuxHandle {
         };
 
         let encoded = frame.encode();
-        let node = self.inner.node.lock().unwrap().clone();
+        let node = &self.inner.node;
 
         // Send in LINK_MDU-sized chunks
         for chunk in encoded.chunks(LINK_MDU) {

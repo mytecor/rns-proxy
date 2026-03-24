@@ -7,6 +7,7 @@
 //! [1 byte type][4 bytes session_id][2 bytes payload length][payload]
 //! ```
 
+pub mod cli;
 pub mod client;
 pub mod frame;
 pub mod mux;

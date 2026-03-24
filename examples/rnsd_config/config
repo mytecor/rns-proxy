@@ -6,3 +6,12 @@
 
 [logging]
   loglevel = 7
+
+[interfaces]
+  [[Auto Discovery]]
+    type = AutoInterface
+    interface_enabled = True
+    discovery_scope = link
+    discovery_port = 29716
+    data_port = 42671
+    devices = en0

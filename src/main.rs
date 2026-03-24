@@ -3,10 +3,8 @@
 //! A SOCKS5 proxy that tunnels TCP connections over the Reticulum Network Stack.
 //! Run as either a server (exit node) or client (local SOCKS5 proxy).
 
-mod cli;
-
 use clap::Parser;
-use cli::{Cli, Commands};
+use rns_proxy::cli::{Cli, Commands};
 
 #[tokio::main]
 async fn main() {
@@ -19,11 +17,14 @@ async fn main() {
         .init();
 
     match cli.command {
-        Commands::Server => {
-            rns_proxy::server::run_server().await;
+        Commands::Server { identity_file } => {
+            rns_proxy::server::run_server(identity_file.as_deref()).await;
         }
-        Commands::Client { server, port } => {
-            rns_proxy::client::run_client(&server, port).await;
+        Commands::Client {
+            destination,
+            listen,
+        } => {
+            rns_proxy::client::run_client(&destination, &listen).await;
         }
     }
 }

@@ -8,21 +8,14 @@
 //! 3. On each incoming link, creates a `MuxHandle`.
 //! 4. For each CONNECT frame, spawns a tokio task that opens a real TCP connection
 //!    and relays data bidirectionally.
-//! 5. When the transport to rnsd dies, recreates the RNS node and re-registers.
-//!
-//! WORKAROUND(rns-rs#3): The session-loop architecture (run_server → run_server_session
-//! in a loop) exists because LocalClientInterface has no reconnect logic. When rnsd
-//! restarts, we must recreate the entire RnsNode to get a fresh connection.
-//! Once rns-rs merges LocalClientInterface reconnection support, this can be
-//! simplified back to a single event loop without the outer restart loop.
-//! https://github.com/lelloman/rns-rs/issues/3
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use log::{error, info, warn};
 use rns_crypto::identity::Identity;
-use rns_crypto::OsRng;
+use rns_net::storage;
 use rns_net::{Destination, IdentityHash, LinkId};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -33,11 +26,47 @@ use crate::{
     APP_ASPECT, APP_NAME,
 };
 
+/// Default identity filename inside the Reticulum config directory.
+const DEFAULT_IDENTITY_FILENAME: &str = "rns_proxy_identity";
+
+/// Resolve the identity file path.
+///
+/// If `override_path` is given, uses it as-is.  Otherwise defaults to
+/// `~/.reticulum/<DEFAULT_IDENTITY_FILENAME>`.
+fn identity_file_path(override_path: Option<&str>) -> PathBuf {
+    match override_path {
+        Some(p) => PathBuf::from(p),
+        None => storage::resolve_config_dir(None).join(DEFAULT_IDENTITY_FILENAME),
+    }
+}
+
 /// Run the SOCKS5 server.
-pub async fn run_server() {
-    // Generate identity once — must persist across rnsd restarts so the
-    // destination hash (client address) stays the same.
-    let identity = Identity::new(&mut OsRng);
+///
+/// `identity_path` overrides the default identity file location
+/// (`~/.reticulum/rns_proxy_identity`).
+pub async fn run_server(identity_path: Option<&str>) {
+    let id_path = identity_file_path(identity_path);
+
+    let identity = if id_path.exists() {
+        let id = storage::load_identity(&id_path).unwrap_or_else(|e| {
+            panic!("Failed to load identity from {}: {}", id_path.display(), e);
+        });
+        info!("Loaded identity from {}", id_path.display());
+        id
+    } else {
+        let id = Identity::new(&mut rns_crypto::OsRng);
+        if let Some(parent) = id_path.parent() {
+            std::fs::create_dir_all(parent).unwrap_or_else(|e| {
+                panic!("Failed to create directory {}: {}", parent.display(), e);
+            });
+        }
+        storage::save_identity(&id, &id_path).unwrap_or_else(|e| {
+            panic!("Failed to save identity to {}: {}", id_path.display(), e);
+        });
+        info!("Generated new identity, saved to {}", id_path.display());
+        id
+    };
+
     let identity_prv_bytes = identity.get_private_key().expect("has private key");
     let dest = Destination::single_in(APP_NAME, &[APP_ASPECT], IdentityHash(*identity.hash()));
     let dest_hash = dest.hash.0;
@@ -51,51 +80,22 @@ pub async fn run_server() {
     info!("Server address (stable across restarts):");
     info!("  {}", hex::encode(dest_hash));
 
-    loop {
-        if let Err(()) = run_server_session(
-            &dest,
-            dest_hash,
-            sig_prv,
-            sig_pub,
-            &identity_prv_bytes,
-        )
-        .await
-        {
-            warn!("Server session ended, restarting in 5s...");
-            tokio::time::sleep(Duration::from_secs(5)).await;
-        }
-    }
-}
-
-/// Run a single server session. Returns `Err(())` when the transport dies
-/// and the caller should recreate the session.
-///
-/// WORKAROUND(rns-rs#3): This function exists solely because LocalClientInterface
-/// cannot reconnect to rnsd. Remove once fixed upstream — fold back into run_server.
-/// https://github.com/lelloman/rns-rs/issues/3
-async fn run_server_session(
-    dest: &Destination,
-    dest_hash: [u8; 16],
-    sig_prv: [u8; 32],
-    sig_pub: [u8; 32],
-    identity_prv_bytes: &[u8; 64],
-) -> Result<(), ()> {
     let (node, mut rx) = match create_node() {
         Ok(v) => v,
         Err(e) => {
             error!("Failed to create RNS node: {}", e);
-            return Err(());
+            return;
         }
     };
 
     // Register link destination (server accepts incoming links)
     if let Err(e) = node.register_link_destination(dest_hash, sig_prv, sig_pub, 0) {
         error!("Failed to register link destination: {:?}", e);
-        return Err(());
+        return;
     }
 
-    let id = Identity::from_private_key(identity_prv_bytes);
-    if let Err(e) = node.announce(dest, &id, None) {
+    let id = Identity::from_private_key(&identity_prv_bytes);
+    if let Err(e) = node.announce(&dest, &id, None) {
         warn!("Failed to send announce: {:?}", e);
     }
     info!("Server ready, waiting for connections...");
@@ -107,11 +107,10 @@ async fn run_server_session(
     // Periodic announce task
     let node_announce = Arc::clone(&node);
     let dest_clone = dest.clone();
-    let identity_prv_for_announce = *identity_prv_bytes;
-    let announce_task = tokio::spawn(async move {
+    tokio::spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
-            let id = Identity::from_private_key(&identity_prv_for_announce);
+            let id = Identity::from_private_key(&identity_prv_bytes);
             if let Err(e) = node_announce.announce(&dest_clone, &id, None) {
                 warn!("Failed to send periodic announce: {:?}", e);
             }
@@ -119,10 +118,10 @@ async fn run_server_session(
     });
 
     // Event loop
-    let result = loop {
+    loop {
         let event = match rx.recv().await {
             Some(e) => e,
-            None => break Ok(()),
+            None => return,
         };
 
         match event {
@@ -189,23 +188,9 @@ async fn run_server_session(
                 }
             }
 
-            // WORKAROUND(rns-rs#3): LocalClientInterface has no reconnect,
-            // so we must recreate the entire node. Remove once fixed upstream.
-            // https://github.com/lelloman/rns-rs/issues/3
-            ProxyEvent::InterfaceDown => {
-                warn!("Transport to rnsd lost, will reconnect...");
-                // Drop all client sessions
-                link_muxes.lock().unwrap().clear();
-                break Err(());
-            }
-
             _ => {}
         }
-    };
-
-    // Clean up announce task
-    announce_task.abort();
-    result
+    }
 }
 
 /// Handle a single proxied TCP session on the server side.

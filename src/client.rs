@@ -30,7 +30,7 @@ use crate::{
 };
 
 /// Run the SOCKS5 client.
-pub async fn run_client(server_hex: &str, port: u16) {
+pub async fn run_client(server_hex: &str, listen_addr: &str) {
     let server_dest_hash: [u8; 16] = match hex::decode(server_hex) {
         Ok(v) if v.len() == 16 => {
             let mut arr = [0u8; 16];
@@ -62,14 +62,14 @@ pub async fn run_client(server_hex: &str, port: u16) {
     }
 
     // Start SOCKS5 listener
-    let listener = match TcpListener::bind(format!("127.0.0.1:{}", port)).await {
+    let listener = match TcpListener::bind(listen_addr).await {
         Ok(l) => l,
         Err(e) => {
-            error!("Failed to bind SOCKS5 port: {}", e);
+            error!("Failed to bind SOCKS5 listener on {}: {}", listen_addr, e);
             return;
         }
     };
-    info!("SOCKS5 ready: 127.0.0.1:{}", port);
+    info!("SOCKS5 ready: {}", listen_addr);
 
     // Notify used to signal the accept loop that the link was lost and reconnected
     let reconnect_notify = Arc::new(Notify::new());
@@ -117,26 +117,15 @@ pub async fn run_client(server_hex: &str, port: u16) {
             }
             _ = reconnect_notify.notified() => {
                 // Link was re-established, just continue accepting
-                info!("SOCKS5 ready: 127.0.0.1:{}", port);
+                info!("SOCKS5 ready: {}", listen_addr);
             }
         }
     }
 }
 
-/// Timeout for waiting for a link to be established.
-///
-/// WORKAROUND(rns-rs#3): LocalClientInterface has no reconnect logic, so when
-/// rnsd restarts the interface goes offline permanently and create_link packets
-/// are silently dropped. Without this timeout establish_link would hang forever.
-/// Remove once rns-rs merges LocalClientInterface reconnection support.
-/// https://github.com/lelloman/rns-rs/issues/3
-const LINK_ESTABLISH_TIMEOUT: Duration = Duration::from_secs(15);
-
 /// Establish an RNS link, waiting for the LinkEstablished event.
 ///
 /// On success, sets the link id on the mux and returns `true`.
-/// Times out after `LINK_ESTABLISH_TIMEOUT` to avoid hanging forever
-/// when the underlying transport is dead (e.g. rnsd was restarted).
 async fn establish_link(
     node: &RnsNode,
     mux: &MuxHandle,
@@ -153,163 +142,82 @@ async fn establish_link(
         }
     };
 
-    let result = tokio::time::timeout(LINK_ESTABLISH_TIMEOUT, async {
-        loop {
-            let event = match rx.recv().await {
-                Some(e) => e,
-                None => {
-                    error!("Event channel closed");
+    loop {
+        let event = match rx.recv().await {
+            Some(e) => e,
+            None => {
+                error!("Event channel closed");
+                return false;
+            }
+        };
+
+        match event {
+            ProxyEvent::LinkEstablished {
+                link_id: lid,
+                rtt,
+                is_initiator,
+            } => {
+                if lid == link_id && is_initiator {
+                    info!("RNS link established (rtt={:.1}ms)", rtt * 1000.0);
+                    mux.set_link_id(link_id);
+                    return true;
+                }
+            }
+            ProxyEvent::LinkClosed {
+                link_id: lid,
+                reason,
+            } => {
+                if lid == link_id {
+                    error!("Link closed during setup: {:?}", reason);
                     return false;
                 }
-            };
-
-            match event {
-                ProxyEvent::LinkEstablished {
-                    link_id: lid,
-                    rtt,
-                    is_initiator,
-                } => {
-                    if lid == link_id && is_initiator {
-                        info!("RNS link established (rtt={:.1}ms)", rtt * 1000.0);
-                        mux.set_link_id(link_id);
-                        return true;
-                    }
-                }
-                ProxyEvent::LinkClosed {
-                    link_id: lid,
-                    reason,
-                } => {
-                    if lid == link_id {
-                        error!("Link closed during setup: {:?}", reason);
-                        return false;
-                    }
-                }
-                _ => {}
             }
-        }
-    })
-    .await;
-
-    match result {
-        Ok(success) => success,
-        Err(_) => {
-            warn!("Link establishment timed out (transport may be down)");
-            false
+            _ => {}
         }
     }
 }
-
-/// Maximum consecutive link establishment failures before recreating the RNS node.
-///
-/// WORKAROUND(rns-rs#3): LocalClientInterface has no reconnect logic. When rnsd
-/// restarts, the interface goes offline permanently and packets are silently
-/// dropped. After this many consecutive establish_link timeouts, we recreate
-/// the entire RnsNode to get a fresh TCP connection to rnsd.
-/// Remove once rns-rs merges LocalClientInterface reconnection support.
-/// https://github.com/lelloman/rns-rs/issues/3
-const MAX_LINK_FAILURES_BEFORE_NODE_RECREATE: u32 = 3;
 
 /// Event dispatch loop with automatic reconnection.
 ///
 /// Reads RNS events, dispatches channel messages to sessions, and when the
 /// link is lost, waits briefly and re-establishes it.
-///
-/// WORKAROUND(rns-rs#3): If the underlying transport is dead (rnsd restarted),
-/// link establishment will repeatedly time out. After several failures, the
-/// RNS node is recreated to get a fresh connection to rnsd. The entire node
-/// recreation block (InterfaceDown handling + consecutive_failures +
-/// create_node loop) can be removed once rns-rs merges LocalClientInterface
-/// reconnection support — at that point a simple retry of establish_link
-/// will suffice.
-/// https://github.com/lelloman/rns-rs/issues/3
 async fn dispatch_and_reconnect(
     mux: MuxHandle,
-    mut node: Arc<RnsNode>,
+    node: Arc<RnsNode>,
     dest_hash: [u8; 16],
     mut rx: mpsc::UnboundedReceiver<ProxyEvent>,
     reconnect_notify: Arc<Notify>,
 ) {
-    let mut transport_dead = false;
-
     loop {
         // --- Dispatch phase: forward channel messages to sessions ---
-        if !transport_dead {
-            loop {
-                let event = match rx.recv().await {
-                    Some(e) => e,
-                    None => {
-                        error!("Event channel closed, shutting down");
-                        return;
-                    }
-                };
-
-                match event {
-                    ProxyEvent::LinkData { data, .. } => {
-                        for frame in mux.receive_data(&data) {
-                            mux.dispatch(frame);
-                        }
-                    }
-                    ProxyEvent::LinkClosed { link_id, reason } => {
-                        warn!("Connection lost (link={}, reason={:?})", link_id, reason);
-                        mux.reset();
-                        break; // Exit dispatch loop to reconnect
-                    }
-                    // WORKAROUND(rns-rs#3): LocalClientInterface has no reconnect,
-                    // so we must recreate the entire node. Remove once fixed upstream.
-                    // https://github.com/lelloman/rns-rs/issues/3
-                    ProxyEvent::InterfaceDown => {
-                        warn!("Transport to rnsd lost");
-                        mux.reset();
-                        transport_dead = true;
-                        break; // Skip to node recreation
-                    }
-                    _ => {}
+        loop {
+            let event = match rx.recv().await {
+                Some(e) => e,
+                None => {
+                    error!("Event channel closed, shutting down");
+                    return;
                 }
+            };
+
+            match event {
+                ProxyEvent::LinkData { data, .. } => {
+                    for frame in mux.receive_data(&data) {
+                        mux.dispatch(frame);
+                    }
+                }
+                ProxyEvent::LinkClosed { link_id, reason } => {
+                    warn!("Connection lost (link={}, reason={:?})", link_id, reason);
+                    mux.reset();
+                    break; // Exit dispatch loop to reconnect
+                }
+                _ => {}
             }
         }
 
         // --- Reconnection phase ---
         let mut delay = 1u64;
-        let mut consecutive_failures: u32 = if transport_dead {
-            // Skip straight to node recreation
-            MAX_LINK_FAILURES_BEFORE_NODE_RECREATE
-        } else {
-            0
-        };
-        transport_dead = false;
 
         loop {
-            // WORKAROUND(rns-rs#3): LocalClientInterface has no reconnect logic.
-            // If too many consecutive failures, the transport is likely dead —
-            // recreate the RNS node to get a fresh connection to rnsd.
-            // This entire block can be removed once rns-rs merges the fix.
-            // https://github.com/lelloman/rns-rs/issues/3
-            if consecutive_failures >= MAX_LINK_FAILURES_BEFORE_NODE_RECREATE {
-                warn!(
-                    "Transport appears dead after {} failures, recreating RNS node...",
-                    consecutive_failures
-                );
-
-                match create_node() {
-                    Ok((new_node, new_rx)) => {
-                        info!("RNS node recreated, new connection to rnsd");
-                        node = new_node;
-                        rx = new_rx;
-                        mux.replace_node(Arc::clone(&node));
-                        consecutive_failures = 0;
-                        delay = 1;
-                        // After recreating the node, paths are gone.
-                        // Fall through to path discovery below.
-                    }
-                    Err(e) => {
-                        warn!("Failed to recreate RNS node: {} (rnsd may not be running)", e);
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        // Keep trying to recreate — don't reset consecutive_failures
-                        continue;
-                    }
-                }
-            }
-
             info!("Reconnecting in {}s...", delay);
             tokio::time::sleep(Duration::from_secs(delay)).await;
 
@@ -317,7 +225,6 @@ async fn dispatch_and_reconnect(
             if !ensure_path(&node, &dest_hash, 15).await {
                 warn!("Path not found, will retry...");
                 delay = (delay * 2).min(30);
-                consecutive_failures += 1;
                 continue;
             }
 
@@ -328,7 +235,6 @@ async fn dispatch_and_reconnect(
                 None => {
                     warn!("Failed to recall identity, will retry...");
                     delay = (delay * 2).min(30);
-                    consecutive_failures += 1;
                     continue;
                 }
             };
@@ -341,7 +247,6 @@ async fn dispatch_and_reconnect(
 
             warn!("Reconnection failed, will retry...");
             delay = (delay * 2).min(30);
-            consecutive_failures += 1;
         }
     }
 }

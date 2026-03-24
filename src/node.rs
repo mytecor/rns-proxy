@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use rns_net::common::destination::AnnouncedIdentity;
 use rns_net::{
-    Callbacks, DestHash, InterfaceId, LinkId, PacketHash, RnsNode, SharedClientConfig,
-    TeardownReason,
+    Callbacks, DestHash, LinkId, PacketHash, RnsNode, SharedClientConfig, TeardownReason,
 };
 use tokio::sync::mpsc;
 
@@ -48,13 +47,6 @@ pub enum ProxyEvent {
         data: Vec<u8>,
     },
     PathUpdated,
-    /// The underlying interface (connection to rnsd) went offline.
-    ///
-    /// WORKAROUND(rns-rs#3): Used to detect rnsd restart since LocalClientInterface
-    /// has no reconnect logic. Can be removed once fixed upstream — the interface
-    /// will reconnect transparently and this event won't need special handling.
-    /// https://github.com/lelloman/rns-rs/issues/3
-    InterfaceDown,
 }
 
 /// Shared RNS callbacks that forward events via an mpsc channel.
@@ -92,12 +84,5 @@ impl Callbacks for ProxyCallbacks {
 
     fn on_link_data(&mut self, link_id: LinkId, _context: u8, data: Vec<u8>) {
         let _ = self.tx.send(ProxyEvent::LinkData { link_id, data });
-    }
-
-    /// WORKAROUND(rns-rs#3): Forward interface-down to trigger node recreation.
-    /// Remove once LocalClientInterface reconnection is fixed upstream.
-    /// https://github.com/lelloman/rns-rs/issues/3
-    fn on_interface_down(&mut self, _id: InterfaceId) {
-        let _ = self.tx.send(ProxyEvent::InterfaceDown);
     }
 }

@@ -16,16 +16,21 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Commands {
     /// Run the SOCKS5 proxy server (exit node)
-    Server,
+    Server {
+        /// Path to the identity file for persistent server address.
+        /// Defaults to ~/.reticulum/rns_proxy_identity
+        #[arg(long, value_name = "PATH")]
+        identity_file: Option<String>,
+    },
 
     /// Run the SOCKS5 proxy client (local proxy)
     Client {
-        /// RNS address of the server (hex)
-        #[arg(long)]
-        server: String,
+        /// RNS destination hash (hex)
+        #[arg(short, long)]
+        destination: String,
 
-        /// Local SOCKS5 listen port
-        #[arg(long, default_value_t = 1080)]
-        port: u16,
+        /// Local SOCKS5 listen address
+        #[arg(short, long, default_value = "127.0.0.1:1080")]
+        listen: String,
     },
 }

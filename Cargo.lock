@@ -691,9 +691,9 @@ checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
 
 [[package]]
 name = "rns-core"
-version = "0.1.5"
+version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "627602efaea6ea6cac78cd317cb0bfffcc250e9004f71e7df452dec330db23b0"
+checksum = "ae55bc0a08d6fcc3750bb0fef12f602feb0116b6e6f8d22a572a77bfe57b06eb"
 dependencies = [
  "log",
  "rns-crypto",
@@ -715,9 +715,9 @@ dependencies = [
 
 [[package]]
 name = "rns-net"
-version = "0.5.1"
+version = "0.5.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee10b50b1f93fb336e9b480b9e8496db155ebc8b01e8d5439c025b02a26e7b59"
+checksum = "30e03b52f537c0952c983c6250e98872a80e8238ef447c3e55bf6f6ac5183e80"
 dependencies = [
  "bzip2",
  "libc",

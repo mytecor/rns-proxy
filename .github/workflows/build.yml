@@ -30,9 +30,7 @@ jobs:
 
       - name: Package
         if: ${{ inputs.system }}
-        run: |
-          cd result/bin
-          tar czf ../../rns-proxy-${{ inputs.system }}.tar.gz rns-proxy
+        run: tar czf rns-proxy-${{ inputs.system }}.tar.gz -C result/bin rns-proxy
 
       - name: Upload artifact
         if: ${{ inputs.system }}

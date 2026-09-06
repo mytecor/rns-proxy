@@ -130,11 +130,17 @@ pub async fn target_to_socket(addr: TargetAddr) -> Option<SocketAddr> {
 }
 
 
-pub async fn allowed_ip(socket_addr: SocketAddr, filter_config: &FilterConfig) -> bool {
+pub async fn allowed_ip(socket_addr: SocketAddr, filter_config: &FilterConfig, port_type: PortType) -> bool {
     let mut include = false; // by default we don't allow anything.
 
     for filter in &filter_config.filters {
-        if filter.address_filter.filter(&socket_addr) && filter.port_filter.filter(&socket_addr) {
+        let type_matches = matches!(
+            (&filter.port_filter.port_type, &port_type),
+            (&PortType::Tcp, &PortType::Tcp)
+                | (&PortType::Udp, &PortType::Udp)
+                | (&PortType::TcpUdp, _)
+        );
+        if type_matches && filter.address_filter.filter(&socket_addr) && filter.port_filter.filter(&socket_addr) {
             match filter.filter_result {
                 FilterResult::Exclude => {include = false}
                 FilterResult::Include => {include = true}
@@ -153,10 +159,10 @@ pub async fn allowed_ip(socket_addr: SocketAddr, filter_config: &FilterConfig) -
 /// getting the real ip and then passing it back. This is prevent some sneaky stuff from happening.
 ///
 /// also we don't currently discriminate against tcp or udp. that's a todo for later
-pub async fn filter_and_convert(addr: TargetAddr, filter_config: Option<&FilterConfig>) -> Option<SocketAddr> {
+pub async fn filter_and_convert(addr: TargetAddr, filter_config: Option<&FilterConfig>, port_type: PortType) -> Option<SocketAddr> {
     let socket_addr = target_to_socket(addr).await?;
     if let Some(filter_config) = filter_config {
-        if  allowed_ip(socket_addr, filter_config).await {
+        if allowed_ip(socket_addr, filter_config, port_type).await {
            return Some(socket_addr) 
         } else {
             return None
@@ -168,3 +174,26 @@ pub async fn filter_and_convert(addr: TargetAddr, filter_config: Option<&FilterC
     
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{allowed_ip, AddressFilter, Filter, FilterConfig, FilterResult, PortFilter, PortFilterType};
+    use crate::forwarding::PortType;
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[tokio::test]
+    async fn port_type_is_enforced() {
+        let config = FilterConfig {
+            filters: vec![Filter {
+                address_filter: AddressFilter::Address(IpAddr::V4(Ipv4Addr::LOCALHOST)),
+                port_filter: PortFilter {
+                    port_filter: PortFilterType::Single(25565),
+                    port_type: PortType::Tcp,
+                },
+                filter_result: FilterResult::Include,
+            }],
+        };
+        let addr = SocketAddr::from((Ipv4Addr::LOCALHOST, 25565));
+        assert!(allowed_ip(addr, &config, PortType::Tcp).await);
+        assert!(!allowed_ip(addr, &config, PortType::Udp).await);
+    }
+}

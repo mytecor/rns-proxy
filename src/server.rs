@@ -22,6 +22,7 @@ use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::filter::{FilterConfig, filter_and_convert};
+use crate::forwarding::PortType;
 use crate::mux::MuxHandle;
 use crate::relay::relay_bidirectional_udp_server_side;
 use crate::{
@@ -215,7 +216,7 @@ async fn handle_server_session_tcp(
     filter_config: FilterConfig
 ) {
 
-    if let Some(socket) = filter_and_convert(addr.clone(), Some(&filter_config)).await {
+    if let Some(socket) = filter_and_convert(addr.clone(), Some(&filter_config), PortType::Tcp).await {
         let stream = match TcpStream::connect(socket).await {
             Ok(s) => s,
             Err(e) => {
@@ -277,4 +278,3 @@ async fn handle_server_session_udp(
     relay_bidirectional_udp_server_side(sid, socket, mux, session_rx, filter_config).await;
     info!("[{}] UDP Closed", sid);
 }
-

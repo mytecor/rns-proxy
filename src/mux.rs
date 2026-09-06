@@ -53,20 +53,19 @@ pub fn run_link_sender(node: Arc<RnsNode>, link_id: Arc<Mutex<Option<LinkId>>>) 
 
     tokio::spawn(async move {
         while let Some(data_frame) = receiver.recv().await {
-            let lock = link_id.lock().await;
-            let value = &*(lock);
-            let link_id = match value {
+            let active_link = match *link_id.lock().await {
                 Some(id) => id,
                 None => {
                     warn!("send_frame: no active link, dropping frame");
-                    return;
+                    continue;
                 }
             };
 
             for chunk in data_frame.chunks(LINK_MDU) {
-                if let Err(e) = node.send_on_link(link_id.0, chunk.to_vec(), DATA_CONTEXT) {
+                if let Err(e) = node.send_on_link(active_link.0, chunk.to_vec(), DATA_CONTEXT) {
                     warn!("Failed to send link data: {:?}", e);
-                    return;
+                    *link_id.lock().await = None;
+                    break;
                 }
             }
             
@@ -185,8 +184,6 @@ impl MuxHandle {
         let mut buf = self.inner.recv_buf.lock().await;
         buf.extend_from_slice(data);
         // info!("buf: {:?}", buf);
-        let buf_clone = buf.clone();
-
         let mut frames = Vec::new();
         loop {
             match Frame::decode(&buf) {
@@ -209,13 +206,16 @@ impl MuxHandle {
                            // just wait for next packet 
                         }
                         DecodingFailed => {
-                            // something has gone really wrong, just clear the buffer and hope things
-                            // work out.
-                            error!("decoding failed for a packet, something really bad is happening buf: {:?} data: {:?}",buf, data);
-                            error!("original buf {:?}", buf_clone);
-                            error!("abort to avoid corrupting the stream:");
-                            assert!(false);
-                            buf.drain(..);
+                            // A damaged or out-of-sync frame must not crash the
+                            // event-loop worker. Discard the buffered stream and
+                            // wait for the next frame boundary.
+                            error!(
+                                "frame decode failed; dropping {} buffered bytes ({} new bytes)",
+                                buf.len(),
+                                data.len()
+                            );
+                            error!("buffer prefix: {:?}", &buf[..buf.len().min(16)]);
+                            buf.clear();
                             break;
                         }
                     }

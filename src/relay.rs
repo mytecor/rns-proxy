@@ -14,6 +14,7 @@ use tokio::sync::{Mutex, mpsc};
 use udp_stream::UdpStream;
 
 use crate::filter::{FilterConfig, allowed_ip, filter_and_convert};
+use crate::forwarding::PortType;
 use crate::frame::{Frame, FrameType};
 use crate::mux::MuxHandle;
 
@@ -33,7 +34,7 @@ pub async fn relay_bidirectional_tcp(
     debug!("[{}] relay bidirectional tcp", sid);
 
     // TCP -> RNS
-    let tcp_to_rns = tokio::spawn(async move {
+    let mut tcp_to_rns = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         loop {
             match tcp_read.read(&mut buf).await {
@@ -51,7 +52,7 @@ pub async fn relay_bidirectional_tcp(
     });
 
     // RNS -> TCP
-    let rns_to_tcp = tokio::spawn(async move {
+    let mut rns_to_tcp = tokio::spawn(async move {
         while let Some(frame) = session_rx.recv().await {
             match frame.frame_type {
                 FrameType::Data => {
@@ -69,8 +70,8 @@ pub async fn relay_bidirectional_tcp(
     });
 
     tokio::select! {
-        _ = tcp_to_rns => {},
-        _ = rns_to_tcp => {},
+        _ = &mut tcp_to_rns => { rns_to_tcp.abort(); },
+        _ = &mut rns_to_tcp => { tcp_to_rns.abort(); },
     }
 
     debug!("[{}] drop connection", sid);
@@ -230,7 +231,7 @@ pub async fn relay_bidirectional_udp_server_side(
              match stuff {
                 Ok((0,_)) => { break},
                 Ok((n,addr)) => {
-                    if allowed_ip(addr, &config1).await {
+                    if allowed_ip(addr, &config1, PortType::Udp).await {
                         let mut packet = new_udp_header(addr).expect("cannot wrap udp packet");
                         packet.extend_from_slice(&buf[..n]);
                         
@@ -259,7 +260,7 @@ pub async fn relay_bidirectional_udp_server_side(
                             Ok((_frag,addr,data)) => {
                                 
 
-                                if let Some(socket) = filter_and_convert(addr.clone(), Some(&config2)).await {
+                                if let Some(socket) = filter_and_convert(addr.clone(), Some(&config2), PortType::Udp).await {
                                     
                                     if let Err(e) = socket1.send_to(data,socket).await {
                                         warn!("[{}] UDP write error: {}", sid, e);
@@ -328,7 +329,7 @@ pub async fn relay_forwarded_tcp(
     debug!("relay forwarded tcp");
 
     // TCP -> RNS
-    let tcp_to_rns = tokio::spawn(async move {
+    let mut tcp_to_rns = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         loop {
             match tcp_read.read(&mut buf).await {
@@ -347,7 +348,7 @@ pub async fn relay_forwarded_tcp(
     });
 
     // RNS -> TCP
-    let rns_to_tcp = tokio::spawn(async move {
+    let mut rns_to_tcp = tokio::spawn(async move {
         while let Some(frame) = session_rx.recv().await {
             match frame.frame_type {
                 FrameType::Data => {
@@ -365,8 +366,8 @@ pub async fn relay_forwarded_tcp(
     });
 
     tokio::select! {
-        _ = tcp_to_rns => {},
-        _ = rns_to_tcp => {},
+        _ = &mut tcp_to_rns => { rns_to_tcp.abort(); },
+        _ = &mut rns_to_tcp => { tcp_to_rns.abort(); },
     }
 
     debug!("[{}] tcp relay ended", sid);
@@ -433,10 +434,6 @@ pub async fn relay_forwarded_udp(
                         }
             
                     };
-                    if let Err(e) = udp_write.write_all(&frame.payload).await {
-                        warn!("[{}] TCP write error: {}", sid, e);
-                        break;
-                    }
                 }
                 FrameType::Close => break,
                 _ => {}
@@ -453,5 +450,4 @@ pub async fn relay_forwarded_udp(
     mux.send(FrameType::Close, sid, Vec::new()).await;
     mux.drop_session(sid).await;
 }
-
 

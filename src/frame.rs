@@ -159,11 +159,23 @@ pub fn decode_connect_payload(data: &[u8]) -> Option<(String, u16, bool)> {
         return None;
     }
     let n = data[0] as usize;
-    if data.len() < 1 + n + 2 {
+    if data.len() < 1 + n + 2 + 1 {
         return None;
     }
     let host = String::from_utf8(data[1..1 + n].to_vec()).ok()?;
     let port = u16::from_be_bytes([data[1 + n], data[2 + n]]);
     let udp = if (data[n + 3] & 0b10000000) == 0  {false} else { true };
     Some((host, port, udp))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{decode_connect_payload, encode_connect_payload};
+
+    #[test]
+    fn rejects_connect_payload_without_settings_byte() {
+        let mut payload = encode_connect_payload("example.com", 25565, false);
+        payload.pop();
+        assert!(decode_connect_payload(&payload).is_none());
+    }
 }

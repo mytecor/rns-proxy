@@ -20,8 +20,17 @@ pub enum Commands {
     Server {
         /// Path to the identity file for persistent server address.
         /// Defaults to ~/.reticulum/rns_proxy_identity
-        #[arg(long, value_name = "PATH")]
+        #[arg(short, long, value_name = "PATH")]
         identity_file: Option<String>,
+
+        /// prevents a client from connecting to localhost addresses.
+        #[clap(long, short, action)]
+        localhost_block: bool,
+
+        /// prevents a client from connecting to private addresses.
+        #[clap(long, short, action)]
+        private_network_block: bool,
+        
     },
 
     /// Run the SOCKS5 proxy client (local proxy)

@@ -22,18 +22,45 @@ async fn main() {
         .init();
 
     match cli.command {
-        Commands::Server { identity_file } => {
-            rns_proxy::server::run_server(identity_file.as_deref(),
+        Commands::Server { identity_file, localhost_block, private_network_block  } => {
 
-                FilterConfig {
-                    filters: vec![Filter {
+
+            let mut filters = vec![Filter {
                         address_filter: rns_proxy::filter::AddressFilter::All,
                         port_filter: PortFilter{
                             port_filter: rns_proxy::filter::PortFilterType::All,
                             port_type: PortType::TcpUdp,
                         },
                         filter_result: FilterResult::Include,
-                    }],
+                    }]; 
+
+            if localhost_block {
+                filters.push(
+                    Filter {
+                        address_filter: rns_proxy::filter::AddressFilter::Localhost,
+                        port_filter: PortFilter{
+                            port_filter: rns_proxy::filter::PortFilterType::All,
+                            port_type: PortType::TcpUdp,
+                        },
+                        filter_result: FilterResult::Exclude,
+                    }
+                )
+            };
+            if private_network_block {
+                filters.push(
+                    Filter {
+                        address_filter: rns_proxy::filter::AddressFilter::Private,
+                        port_filter: PortFilter{
+                            port_filter: rns_proxy::filter::PortFilterType::All,
+                            port_type: PortType::TcpUdp,
+                        },
+                        filter_result: FilterResult::Exclude,
+                    }
+                )
+            };
+            rns_proxy::server::run_server(identity_file.as_deref(),
+                FilterConfig {
+                    filters: filters,
                 }
 
             ).await;

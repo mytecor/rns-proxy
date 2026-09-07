@@ -1,4 +1,4 @@
-use std::net::{IpAddr::{self, V4, V6}, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr::{self, V4, V6},  SocketAddr};
 
 use fast_socks5::util::target_addr::TargetAddr;
 use log::warn;
@@ -59,8 +59,7 @@ impl FilterSocket for AddressFilter {
                 V6(addr) => addr.is_unique_local(),
             },
             Localhost => match addr.ip() {
-                V4(addr) => addr == Ipv4Addr::LOCALHOST, // loopback may not technically be localhost
-                // in ipv4 cause it can be any of 16 million addressses.
+                V4(addr) => addr.is_loopback(),
                 V6(addr) => addr.is_loopback(),
             }
         }

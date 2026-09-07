@@ -106,6 +106,12 @@ Server started. Client address:
   <32-hex-char-destination-hash>
 ```
 
+If you are running a public outproxy, you may want to disable a user from accessing your local (loopback) and private addresses, which can be done with these flags
+
+```bash
+rns-proxy server --pl
+```
+
 #### Connect
 
 To start a exit node that can only connect to certain localhost ports, you can instead do

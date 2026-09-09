@@ -18,7 +18,7 @@ fast-socks5 = "1.0"
 hex = "0.4"
 udp-stream = "0.0.12"
 
-rns-net =  { git = "https://github.com/lelloman/rns-rs.git" , rev = "refs/pull/153/head"}
-rns-core = { git = "https://github.com/lelloman/rns-rs.git" , rev = "refs/pull/153/head"}
-rns-crypto = { git = "https://github.com/lelloman/rns-rs.git" , rev = "refs/pull/153/head"}
+rns-net =  { git = "https://github.com/lelloman/rns-rs.git" , branch = "dev"}
+rns-core = { git = "https://github.com/lelloman/rns-rs.git" , branch = "dev"}
+rns-crypto = { git = "https://github.com/lelloman/rns-rs.git" , branch = "dev"}
 prse = "1.2.1"

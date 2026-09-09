@@ -853,7 +853,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 [[package]]
 name = "rns-core"
 version = "0.1.17"
-source = "git+https://github.com/lelloman/rns-rs.git?rev=refs%2Fpull%2F153%2Fhead#13aa84428cab754542ac316e228fe97ec3b36bdf"
+source = "git+https://github.com/lelloman/rns-rs.git?branch=dev#c4f55cf57657659a85451ad59c1eec720e3785b1"
 dependencies = [
  "libm",
  "log",
@@ -863,7 +863,7 @@ dependencies = [
 [[package]]
 name = "rns-crypto"
 version = "0.1.10"
-source = "git+https://github.com/lelloman/rns-rs.git?rev=refs%2Fpull%2F153%2Fhead#13aa84428cab754542ac316e228fe97ec3b36bdf"
+source = "git+https://github.com/lelloman/rns-rs.git?branch=dev#c4f55cf57657659a85451ad59c1eec720e3785b1"
 dependencies = [
  "aes",
  "cbc",
@@ -876,7 +876,7 @@ dependencies = [
 [[package]]
 name = "rns-net"
 version = "0.7.2"
-source = "git+https://github.com/lelloman/rns-rs.git?rev=refs%2Fpull%2F153%2Fhead#13aa84428cab754542ac316e228fe97ec3b36bdf"
+source = "git+https://github.com/lelloman/rns-rs.git?branch=dev#c4f55cf57657659a85451ad59c1eec720e3785b1"
 dependencies = [
  "bzip2",
  "futures",

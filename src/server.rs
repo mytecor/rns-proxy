@@ -21,12 +21,12 @@ use rns_net::{Destination, IdentityHash, LinkId};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
-use crate::filter::{FilterConfig, filter_and_convert};
+use crate::filter::{filter_and_convert, FilterConfig};
 use crate::forwarding::PortType;
 use crate::mux::MuxHandle;
 use crate::relay::relay_bidirectional_udp_server_side;
 use crate::{
-    create_node, decode_connect_payload, relay_bidirectional_tcp,  Frame, FrameType, ProxyEvent,
+    create_node, decode_connect_payload, relay_bidirectional_tcp, Frame, FrameType, ProxyEvent,
     APP_ASPECT, APP_NAME,
 };
 
@@ -77,12 +77,17 @@ pub async fn run_server(identity_path: Option<&str>, filter_config: FilterConfig
     let dest_hash = dest.hash.0;
 
     // Get signing keys for link destination registration
-    let prv_key = identity.get_private_key().expect("identity has private key");
+    let prv_key = identity
+        .get_private_key()
+        .expect("identity has private key");
     let pub_key = identity.get_public_key().expect("identity has public key");
     let sig_prv: [u8; 32] = prv_key[32..64].try_into().unwrap();
     let sig_pub: [u8; 32] = pub_key[32..64].try_into().unwrap();
 
-    info!("Server address (stable across restarts): {}", hex::encode(dest_hash) );
+    info!(
+        "Server address (stable across restarts): {}",
+        hex::encode(dest_hash)
+    );
 
     let (node, mut rx) = match create_node() {
         Ok(v) => v,
@@ -99,7 +104,7 @@ pub async fn run_server(identity_path: Option<&str>, filter_config: FilterConfig
     }
 
     let id = Identity::from_private_key(&identity_prv_bytes);
-    if let Err(e) = node.announce(&dest, &id, None) {
+    if let Err(e) = node.announce(&dest, &id, None).await {
         warn!("Failed to send announce: {:?}", e);
     }
     info!("Server ready, waiting for connections...");
@@ -115,7 +120,7 @@ pub async fn run_server(identity_path: Option<&str>, filter_config: FilterConfig
         loop {
             tokio::time::sleep(Duration::from_secs(7200)).await;
             let id = Identity::from_private_key(&identity_prv_bytes);
-            if let Err(e) = node_announce.announce(&dest_clone, &id, None) {
+            if let Err(e) = node_announce.announce(&dest_clone, &id, None).await {
                 warn!("Failed to send periodic announce: {:?}", e);
             }
         }
@@ -167,30 +172,32 @@ pub async fn run_server(identity_path: Option<&str>, filter_config: FilterConfig
                     match frame.frame_type {
                         FrameType::Connect => {
                             let sid = frame.session_id;
-                            if let Some((host, port,udp)) = decode_connect_payload(&frame.payload) {
+                            if let Some((host, port, udp)) = decode_connect_payload(&frame.payload)
+                            {
                                 info!("[{}] -> {}:{} tcp", sid, &host, port);
-                                let addr = TargetAddr::Domain(host, port); 
+                                let addr = TargetAddr::Domain(host, port);
                                 let session_rx = mux.register_session(sid).await;
                                 let mux_clone = mux.clone();
                                 let config = filter_config.clone();
                                 if udp {
                                     tokio::spawn(async move {
-                                        handle_server_session_udp(sid, addr , mux_clone, session_rx, config)
-                                            .await;
+                                        handle_server_session_udp(
+                                            sid, addr, mux_clone, session_rx, config,
+                                        )
+                                        .await;
                                     });
-                               } else {
+                                } else {
                                     tokio::spawn(async move {
-                                        handle_server_session_tcp(sid, addr, mux_clone, session_rx, config)
-                                            .await;
+                                        handle_server_session_tcp(
+                                            sid, addr, mux_clone, session_rx, config,
+                                        )
+                                        .await;
                                     });
                                 }
                             } else {
                                 warn!("[{}] Invalid CONNECT payload", sid);
-                                mux.send(
-                                    FrameType::ConnectErr,
-                                    sid,
-                                    b"invalid payload".to_vec(),
-                                ).await;
+                                mux.send(FrameType::ConnectErr, sid, b"invalid payload".to_vec())
+                                    .await;
                             }
                         }
                         FrameType::Data | FrameType::Close => {
@@ -213,22 +220,24 @@ async fn handle_server_session_tcp(
     addr: TargetAddr,
     mux: MuxHandle,
     session_rx: mpsc::UnboundedReceiver<Frame>,
-    filter_config: FilterConfig
+    filter_config: FilterConfig,
 ) {
-
-    if let Some(socket) = filter_and_convert(addr.clone(), Some(&filter_config), PortType::Tcp).await {
+    if let Some(socket) =
+        filter_and_convert(addr.clone(), Some(&filter_config), PortType::Tcp).await
+    {
         let stream = match TcpStream::connect(socket).await {
             Ok(s) => s,
             Err(e) => {
                 warn!("[{}] Connection failed: {}", sid, e);
-                mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes()).await;
+                mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes())
+                    .await;
                 mux.drop_session(sid).await;
                 return;
             }
         };
 
-        _=stream.set_nodelay(true); // we can spare the overhead for less delay RNS side cause it's already not great.
-        // Signal success
+        _ = stream.set_nodelay(true); // we can spare the overhead for less delay RNS side cause it's already not great.
+                                      // Signal success
         mux.send(FrameType::ConnectOk, sid, Vec::new()).await;
 
         // Data relay (shared implementation)
@@ -236,8 +245,13 @@ async fn handle_server_session_tcp(
         relay_bidirectional_tcp(sid, stream, mux, session_rx).await;
         info!("[{}] TCP Closed", sid);
     } else {
-        warn!("[{}] invalid ip address: {:?}", sid,  &addr);
-        mux.send(FrameType::ConnectErr, sid, "invalid ip address".to_string().into_bytes()).await;
+        warn!("[{}] invalid ip address: {:?}", sid, &addr);
+        mux.send(
+            FrameType::ConnectErr,
+            sid,
+            "invalid ip address".to_string().into_bytes(),
+        )
+        .await;
         mux.drop_session(sid).await;
         warn!("should have dropped by now");
         return;
@@ -251,25 +265,25 @@ async fn handle_server_session_udp(
     _target_addr: TargetAddr,
     mux: MuxHandle,
     session_rx: mpsc::UnboundedReceiver<Frame>,
-    filter_config: FilterConfig
+    filter_config: FilterConfig,
 ) {
     // Attempt UDP "connection"
 
     // we ignore whatever the client sent us and just connect to 0.0.0.0:0
-    // we do the actual filtering in relay_bidirectional_udp 
+    // we do the actual filtering in relay_bidirectional_udp
 
     let socket = match UdpSocket::bind("0.0.0.0:0").await {
-    // let socket = match UdpSocket::bind("127.0.0.1:0").await {
+        // let socket = match UdpSocket::bind("127.0.0.1:0").await {
         Ok(s) => s,
         Err(e) => {
             warn!("[{}] udp bind failed 1: {}", sid, e);
-            mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes()).await;
+            mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes())
+                .await;
             mux.drop_session(sid).await;
             return;
         }
     };
 
-    
     info!("successfully made connection?");
     // Signal success
     mux.send(FrameType::ConnectOk, sid, Vec::new()).await;

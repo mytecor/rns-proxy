@@ -16,14 +16,14 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::{Mutex};
+use tokio::sync::Mutex;
 
 use log::{error, info, warn};
 use rns_core::constants::LINK_MDU;
-use rns_net::{LinkId,  RnsNode};
-use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender, unbounded_channel};
+use rns_net::{LinkId, RnsNode};
+use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender};
 
-use crate::frame::FrameDecodeState::{DecodingFailed,  MoreDataRequired};
+use crate::frame::FrameDecodeState::{DecodingFailed, MoreDataRequired};
 use crate::{Frame, FrameType};
 
 /// Context byte for our link data. We use CONTEXT_NONE (0x00) which routes
@@ -48,8 +48,12 @@ struct MuxInner {
 }
 
 // allows for sending things faster cause it's on a different thread and makes sure everything ends up in order.
-pub fn run_link_sender(node: Arc<RnsNode>, link_id: Arc<Mutex<Option<LinkId>>>) -> UnboundedSender<Vec<u8>> {
-    let (sender,mut receiver): (UnboundedSender<Vec<u8>>, UnboundedReceiver<Vec<u8>>) = unbounded_channel();
+pub fn run_link_sender(
+    node: Arc<RnsNode>,
+    link_id: Arc<Mutex<Option<LinkId>>>,
+) -> UnboundedSender<Vec<u8>> {
+    let (sender, mut receiver): (UnboundedSender<Vec<u8>>, UnboundedReceiver<Vec<u8>>) =
+        unbounded_channel();
 
     tokio::spawn(async move {
         while let Some(data_frame) = receiver.recv().await {
@@ -62,21 +66,20 @@ pub fn run_link_sender(node: Arc<RnsNode>, link_id: Arc<Mutex<Option<LinkId>>>) 
             };
 
             for chunk in data_frame.chunks(LINK_MDU) {
-                if let Err(e) = node.send_on_link(active_link.0, chunk.to_vec(), DATA_CONTEXT) {
+                if let Err(e) = node
+                    .send_on_link(active_link.0, chunk.to_vec(), DATA_CONTEXT)
+                    .await
+                {
                     warn!("Failed to send link data: {:?}", e);
                     *link_id.lock().await = None;
                     break;
                 }
             }
-            
         }
     });
 
-
     return sender;
 }
-
-
 
 impl MuxHandle {
     /// Create a new multiplexer handle.
@@ -89,7 +92,7 @@ impl MuxHandle {
                 sessions: Mutex::new(HashMap::new()),
                 next_sid: Mutex::new(0),
                 recv_buf: Mutex::new(Vec::new()),
-                data_sender_buf: Arc::new(run_link_sender(node.clone(), link_id))
+                data_sender_buf: Arc::new(run_link_sender(node.clone(), link_id)),
             }),
         }
     }
@@ -147,15 +150,15 @@ impl MuxHandle {
     /// multiple different sids from sending at the same time and scrambling packets
     pub async fn send_frame(&self, frame: &Frame) {
         let encoded = frame.encode();
-        _=self.inner.data_sender_buf.send(encoded);
+        _ = self.inner.data_sender_buf.send(encoded);
         // pretty much should never error so we don't care.
-
     }
 
     /// Convenience: send a typed frame.
     pub async fn send(&self, frame_type: FrameType, session_id: u32, payload: Vec<u8>) {
         // info!("send frame");
-        self.send_frame(&Frame::new(frame_type, session_id, payload)).await;
+        self.send_frame(&Frame::new(frame_type, session_id, payload))
+            .await;
     }
 
     /// Dispatch an incoming frame to the appropriate session.
@@ -203,7 +206,7 @@ impl MuxHandle {
                         MoreDataRequired => {
                             // info!("more data required");
                             break;
-                           // just wait for next packet 
+                            // just wait for next packet
                         }
                         DecodingFailed => {
                             // A damaged or out-of-sync frame must not crash the
@@ -219,7 +222,7 @@ impl MuxHandle {
                             break;
                         }
                     }
-                },
+                }
             }
         }
 

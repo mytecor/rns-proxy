@@ -47,7 +47,30 @@ struct MuxInner {
     data_sender_buf: Arc<Sender<Vec<u8>>>,
 }
 
-// allows for sending things faster cause it's on a different thread and makes sure everything ends up in order.
+/// allows for sending things faster cause it's on a different thread and makes sure everything ends up in order.
+///
+/// There's a very specific reason why the channel capactity is so low, it comes down to window size
+/// Let's say we are connecting to youtube and downloading a part of a video to watch
+/// With rns-proxy being used as an outproxy for youtube that then being tunneled through reticulum
+/// the issue arises that the end proxy can download from youtube faster than what we can
+/// tunnel through reticulum. We'll assume the reticulum link is in the 10kb/s range while
+/// our normal internet connection is in the 10mb/s range
+///
+/// Let's say the youtube request is 200kb of video data, followed by a query to the client
+/// asking it what part of the video it wants next. If we naively had a unbounded channel
+/// Then the all the video data would be downloaded instantly compared to the slow rns-link
+/// obviously it would take a long time for that video data to reach the other side, the problem
+/// is the tcpstream itself, because all youtube would see is that some ip address (the server here)
+/// has taken in 200kb of video data instantly, and then hasn't replied to the request, and so will
+/// disconnect the tcpstream. Normally youtube would instead see that we are just a slow
+/// downloading client and keep the connection alive, however because we would instantly
+/// put all the tcpstream into an internal buffer instead of keeping in its own buffer.
+///
+/// the solution here is to only read from the tcpstream when we are free to send a packet.
+/// that then means youtube will see a slow client that will eventually respond
+///  instead a fast client that doesn't for no apparent reason
+///
+/// the choice of a buffer size of 5 is arbitary, it just has to be a lowish number
 pub fn run_link_sender(node: Arc<RnsNode>, link_id: Arc<Mutex<Option<LinkId>>>) -> Sender<Vec<u8>> {
     let (sender, mut receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel(5);
 
@@ -62,7 +85,7 @@ pub fn run_link_sender(node: Arc<RnsNode>, link_id: Arc<Mutex<Option<LinkId>>>) 
             };
 
             for chunk in data_frame.chunks(LINK_MDU) {
-                println!("{:?}", chunk);
+                // println!("{:?}", chunk);
                 if let Err(e) = node
                     .send_on_link(active_link.0, chunk.to_vec(), DATA_CONTEXT)
                     .await
@@ -72,7 +95,7 @@ pub fn run_link_sender(node: Arc<RnsNode>, link_id: Arc<Mutex<Option<LinkId>>>) 
                     break;
                 }
             }
-            println!("{}", receiver.len());
+            // println!("{}", receiver.len());
         }
     });
 

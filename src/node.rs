@@ -83,7 +83,6 @@ impl Callbacks for ProxyCallbacks {
     }
 
     fn on_link_data(&mut self, link_id: LinkId, _context: u8, data: Vec<u8>) {
-        // println!("{:?}", data);
         let _ = self.tx.send(ProxyEvent::LinkData { link_id, data });
     }
 }

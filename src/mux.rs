@@ -21,7 +21,7 @@ use tokio::sync::Mutex;
 use log::{error, info, warn};
 use rns_core::constants::LINK_MDU;
 use rns_net::{LinkId, RnsNode};
-use tokio::sync::mpsc::{self, unbounded_channel, UnboundedReceiver, UnboundedSender};
+use tokio::sync::mpsc::{self, channel, Receiver, Sender};
 
 use crate::frame::FrameDecodeState::{DecodingFailed, MoreDataRequired};
 use crate::{Frame, FrameType};
@@ -44,16 +44,12 @@ struct MuxInner {
     next_sid: Mutex<u32>,
     /// Reassembly buffer for incoming raw link data chunks.
     recv_buf: Mutex<Vec<u8>>,
-    data_sender_buf: Arc<UnboundedSender<Vec<u8>>>,
+    data_sender_buf: Arc<Sender<Vec<u8>>>,
 }
 
 // allows for sending things faster cause it's on a different thread and makes sure everything ends up in order.
-pub fn run_link_sender(
-    node: Arc<RnsNode>,
-    link_id: Arc<Mutex<Option<LinkId>>>,
-) -> UnboundedSender<Vec<u8>> {
-    let (sender, mut receiver): (UnboundedSender<Vec<u8>>, UnboundedReceiver<Vec<u8>>) =
-        unbounded_channel();
+pub fn run_link_sender(node: Arc<RnsNode>, link_id: Arc<Mutex<Option<LinkId>>>) -> Sender<Vec<u8>> {
+    let (sender, mut receiver): (Sender<Vec<u8>>, Receiver<Vec<u8>>) = channel(5);
 
     tokio::spawn(async move {
         while let Some(data_frame) = receiver.recv().await {
@@ -66,6 +62,7 @@ pub fn run_link_sender(
             };
 
             for chunk in data_frame.chunks(LINK_MDU) {
+                println!("{:?}", chunk);
                 if let Err(e) = node
                     .send_on_link(active_link.0, chunk.to_vec(), DATA_CONTEXT)
                     .await
@@ -75,6 +72,7 @@ pub fn run_link_sender(
                     break;
                 }
             }
+            println!("{}", receiver.len());
         }
     });
 
@@ -150,7 +148,7 @@ impl MuxHandle {
     /// multiple different sids from sending at the same time and scrambling packets
     pub async fn send_frame(&self, frame: &Frame) {
         let encoded = frame.encode();
-        _ = self.inner.data_sender_buf.send(encoded);
+        _ = self.inner.data_sender_buf.send(encoded).await;
         // pretty much should never error so we don't care.
     }
 

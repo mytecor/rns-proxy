@@ -382,7 +382,7 @@ pub async fn connect_tcp_server_side(
      // if let Some(socket_addr) = filter_and_convert(target_addr, None).await {
 
         let (host, port) = target_addr.clone().into_string_and_port();
-        info!("[{}] -> {}:{} tcp", sid, host, port);
+        // info!("[{}] -> {}:{} tcp", sid, host, port);
         // Send CONNECT frame through RNS
         let connect_payload = encode_connect_payload(&host, port,false);
         mux.send(FrameType::Connect, sid, connect_payload).await;

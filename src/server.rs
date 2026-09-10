@@ -238,6 +238,7 @@ async fn handle_server_session_tcp(
 
         _ = stream.set_nodelay(true); // we can spare the overhead for less delay RNS side cause it's already not great.
                                       // Signal success
+        _=stream.set_quickack(true); // will lower performance but means we can adjust window size more often. RNS proxying is slow enough that this is worthwhile trade for the server end of the proxy to have slightly less throughput
         mux.send(FrameType::ConnectOk, sid, Vec::new()).await;
 
         // Data relay (shared implementation)

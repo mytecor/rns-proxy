@@ -17,7 +17,7 @@ tokio = { version = "1.44", features = ["full"] }
 fast-socks5 = "1.0"
 hex = "0.4"
 
-rns-net = "=0.6.1"
-rns-core = "=0.1.15"
-rns-crypto = "=0.1.9"
+rns-net = "0.8.0"
+rns-core = "0.3.0"
+rns-crypto = "0.2.0"
 

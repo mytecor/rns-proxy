@@ -95,7 +95,7 @@ pub async fn run_server(identity_path: Option<&str>) {
     }
 
     let id = Identity::from_private_key(&identity_prv_bytes);
-    if let Err(e) = node.announce(&dest, &id, None) {
+    if let Err(e) = node.announce(&dest, &id, None).await {
         warn!("Failed to send announce: {:?}", e);
     }
     info!("Server ready, waiting for connections...");
@@ -111,7 +111,7 @@ pub async fn run_server(identity_path: Option<&str>) {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let id = Identity::from_private_key(&identity_prv_bytes);
-            if let Err(e) = node_announce.announce(&dest_clone, &id, None) {
+            if let Err(e) = node_announce.announce(&dest_clone, &id, None).await {
                 warn!("Failed to send periodic announce: {:?}", e);
             }
         }

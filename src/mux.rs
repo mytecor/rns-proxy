@@ -65,7 +65,7 @@ impl MuxHandle {
 
                 let encoded = frame.encode();
                 for chunk in encoded.chunks(LINK_MDU) {
-                    if let Err(e) = node_sender.send_on_link(active_link.0, chunk.to_vec(), DATA_CONTEXT) {
+                    if let Err(e) = node_sender.send_on_link(active_link.0, chunk.to_vec(), DATA_CONTEXT).await {
                         warn!("Failed to send link data: {:?}", e);
                         *link_id_sender.lock().unwrap() = None;
                         break;

@@ -177,7 +177,7 @@ pub async fn run_server(identity_path: Option<&str>) {
                                     FrameType::ConnectErr,
                                     sid,
                                     b"invalid payload".to_vec(),
-                                );
+                                ).await;
                             }
                         }
                         FrameType::Data | FrameType::Close => {
@@ -206,14 +206,14 @@ async fn handle_server_session(
         Ok(s) => s,
         Err(e) => {
             warn!("[{}] Connection failed: {}", sid, e);
-            mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes());
+            mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes()).await;
             mux.drop_session(sid);
             return;
         }
     };
 
     // Signal success
-    mux.send(FrameType::ConnectOk, sid, Vec::new());
+    mux.send(FrameType::ConnectOk, sid, Vec::new()).await;
 
     // Data relay (shared implementation)
     relay_bidirectional(sid, stream, mux, session_rx).await;

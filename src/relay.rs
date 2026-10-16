@@ -20,13 +20,13 @@ pub async fn relay_bidirectional(
     let mux_fwd = mux.clone();
 
     // TCP -> RNS
-    let tcp_to_rns = tokio::spawn(async move {
+    let mut tcp_to_rns = tokio::spawn(async move {
         let mut buf = [0u8; 4096];
         loop {
             match tcp_read.read(&mut buf).await {
                 Ok(0) => break,
                 Ok(n) => {
-                    mux_fwd.send(FrameType::Data, sid, buf[..n].to_vec());
+                    mux_fwd.send(FrameType::Data, sid, buf[..n].to_vec()).await;
                 }
                 Err(e) => {
                     debug!("[{}] TCP read error: {}", sid, e);
@@ -37,7 +37,7 @@ pub async fn relay_bidirectional(
     });
 
     // RNS -> TCP
-    let rns_to_tcp = tokio::spawn(async move {
+    let mut rns_to_tcp = tokio::spawn(async move {
         while let Some(frame) = session_rx.recv().await {
             match frame.frame_type {
                 FrameType::Data => {
@@ -53,10 +53,10 @@ pub async fn relay_bidirectional(
     });
 
     tokio::select! {
-        _ = tcp_to_rns => {},
-        _ = rns_to_tcp => {},
+        _ = &mut tcp_to_rns => { rns_to_tcp.abort(); }
+        _ = &mut rns_to_tcp => { tcp_to_rns.abort(); }
     }
 
-    mux.send(FrameType::Close, sid, Vec::new());
+    mux.send(FrameType::Close, sid, Vec::new()).await;
     mux.drop_session(sid);
 }

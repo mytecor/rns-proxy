@@ -61,11 +61,19 @@ impl fmt::Display for FrameType {
 // ---------------------------------------------------------------------------
 
 /// A multiplexed frame on the wire.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Frame {
     pub frame_type: FrameType,
     pub session_id: u32,
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameDecodeError {
+    /// Buffer does not contain a complete frame yet (need more bytes from link).
+    Incomplete,
+    /// Frame header is corrupted (e.g. unknown frame type).
+    Corrupted,
 }
 
 impl Frame {
@@ -89,20 +97,23 @@ impl Frame {
     }
 
     /// Decode a frame from a complete buffer (header + payload).
-    /// Returns `None` if the buffer is too small or the type is unknown.
-    pub fn decode(buf: &[u8]) -> Option<(Self, usize)> {
+    ///
+    /// Returns `Err(FrameDecodeError::Incomplete)` if more data is needed to finish
+    /// header or payload. Returns `Err(FrameDecodeError::Corrupted)` if the header
+    /// is invalid (unknown frame type).
+    pub fn decode(buf: &[u8]) -> Result<(Self, usize), FrameDecodeError> {
         if buf.len() < HDR_SIZE {
-            return None;
+            return Err(FrameDecodeError::Incomplete);
         }
-        let frame_type = FrameType::from_u8(buf[0])?;
+        let frame_type = FrameType::from_u8(buf[0]).ok_or(FrameDecodeError::Corrupted)?;
         let session_id = u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]);
         let payload_len = u16::from_be_bytes([buf[5], buf[6]]) as usize;
         let total = HDR_SIZE + payload_len;
         if buf.len() < total {
-            return None;
+            return Err(FrameDecodeError::Incomplete);
         }
         let payload = buf[HDR_SIZE..total].to_vec();
-        Some((
+        Ok((
             Self {
                 frame_type,
                 session_id,
@@ -139,4 +150,64 @@ pub fn decode_connect_payload(data: &[u8]) -> Option<(String, u16)> {
     let host = String::from_utf8(data[1..1 + n].to_vec()).ok()?;
     let port = u16::from_be_bytes([data[1 + n], data[2 + n]]);
     Some((host, port))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_frame_encode_decode_roundtrip() {
+        let payload = b"hello reticulum".to_vec();
+        let frame = Frame::new(FrameType::Data, 42, payload.clone());
+        let encoded = frame.encode();
+
+        assert_eq!(encoded.len(), HDR_SIZE + payload.len());
+        let (decoded, consumed) = Frame::decode(&encoded).expect("decode should succeed");
+        assert_eq!(consumed, encoded.len());
+        assert_eq!(decoded.frame_type, FrameType::Data);
+        assert_eq!(decoded.session_id, 42);
+        assert_eq!(decoded.payload, payload);
+    }
+
+    #[test]
+    fn test_frame_decode_incomplete() {
+        let frame = Frame::new(FrameType::Data, 1, vec![0; 50]);
+        let encoded = frame.encode();
+
+        // Less than header
+        assert_eq!(
+            Frame::decode(&encoded[..4]),
+            Err(FrameDecodeError::Incomplete)
+        );
+        // Header present, partial payload
+        assert_eq!(
+            Frame::decode(&encoded[..20]),
+            Err(FrameDecodeError::Incomplete)
+        );
+    }
+
+    #[test]
+    fn test_frame_decode_corrupted() {
+        let mut encoded = Frame::new(FrameType::Data, 1, vec![0; 10]).encode();
+        encoded[0] = 0xFF; // Invalid frame type
+        assert_eq!(
+            Frame::decode(&encoded),
+            Err(FrameDecodeError::Corrupted)
+        );
+    }
+
+    #[test]
+    fn test_connect_payload_roundtrip() {
+        let payload = encode_connect_payload("example.com", 8080);
+        let (host, port) = decode_connect_payload(&payload).expect("decode should succeed");
+        assert_eq!(host, "example.com");
+        assert_eq!(port, 8080);
+    }
+
+    #[test]
+    fn test_connect_payload_invalid() {
+        assert!(decode_connect_payload(&[]).is_none());
+        assert!(decode_connect_payload(&[10, b'a']).is_none());
+    }
 }

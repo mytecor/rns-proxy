@@ -288,7 +288,7 @@ async fn handle_socks5_session(
 
     // Send CONNECT frame through RNS
     let connect_payload = encode_connect_payload(&host, port);
-    mux.send(FrameType::Connect, sid, connect_payload);
+    mux.send(FrameType::Connect, sid, connect_payload).await;
 
     // Wait for CONN_OK or CONN_ERR with timeout
     let connect_result = tokio::time::timeout(Duration::from_secs(15), async {
@@ -316,7 +316,7 @@ async fn handle_socks5_session(
                 Ok(s) => s,
                 Err(e) => {
                     debug!("[{}] Failed to send SOCKS5 reply: {}", sid, e);
-                    mux.send(FrameType::Close, sid, Vec::new());
+                    mux.send(FrameType::Close, sid, Vec::new()).await;
                     mux.drop_session(sid);
                     return;
                 }

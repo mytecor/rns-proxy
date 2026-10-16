@@ -86,7 +86,7 @@ impl MuxHandle {
         }
     }
 
-    #[cfg(test)]
+    /// Create a test/mock multiplexer handle disconnected from Reticulum.
     pub fn new_test() -> (Self, mpsc::Receiver<Frame>) {
         let link_id: Arc<Mutex<Option<LinkId>>> = Arc::new(Mutex::new(None));
         let (frame_tx, frame_rx) = mpsc::channel::<Frame>(32);

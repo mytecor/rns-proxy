@@ -17,13 +17,13 @@ use log::{error, info, warn};
 use rns_crypto::identity::Identity;
 use rns_net::storage;
 use rns_net::{Destination, IdentityHash, LinkId};
-use tokio::net::TcpStream;
+use tokio::net::{TcpStream, UdpSocket};
 use tokio::sync::mpsc;
 
 use crate::mux::MuxHandle;
 use crate::{
-    create_node, decode_connect_payload, relay_bidirectional, Frame, FrameType, ProxyEvent,
-    APP_ASPECT, APP_NAME,
+    create_node, decode_connect_payload, relay_bidirectional, relay_udp_server, Frame, FrameType,
+    ProxyEvent, APP_ASPECT, APP_NAME,
 };
 
 /// Default identity filename inside the Reticulum config directory.
@@ -72,7 +72,9 @@ pub async fn run_server(identity_path: Option<&str>) {
     let dest_hash = dest.hash.0;
 
     // Get signing keys for link destination registration
-    let prv_key = identity.get_private_key().expect("identity has private key");
+    let prv_key = identity
+        .get_private_key()
+        .expect("identity has private key");
     let pub_key = identity.get_public_key().expect("identity has public key");
     let sig_prv: [u8; 32] = prv_key[32..64].try_into().unwrap();
     let sig_pub: [u8; 32] = pub_key[32..64].try_into().unwrap();
@@ -163,21 +165,32 @@ pub async fn run_server(identity_path: Option<&str>) {
                     match frame.frame_type {
                         FrameType::Connect => {
                             let sid = frame.session_id;
-                            if let Some((host, port)) = decode_connect_payload(&frame.payload) {
-                                info!("[{}] -> {}:{}", sid, host, port);
+                            if let Some((host, port, is_udp)) =
+                                decode_connect_payload(&frame.payload)
+                            {
                                 let session_rx = mux.register_session(sid);
                                 let mux_clone = mux.clone();
-                                tokio::spawn(async move {
-                                    handle_server_session(sid, host, port, mux_clone, session_rx)
+                                if is_udp {
+                                    info!("[{}] UDP -> {}:{}", sid, host, port);
+                                    tokio::spawn(async move {
+                                        handle_server_udp_session(
+                                            sid, host, port, mux_clone, session_rx,
+                                        )
                                         .await;
-                                });
+                                    });
+                                } else {
+                                    info!("[{}] TCP -> {}:{}", sid, host, port);
+                                    tokio::spawn(async move {
+                                        handle_server_tcp_session(
+                                            sid, host, port, mux_clone, session_rx,
+                                        )
+                                        .await;
+                                    });
+                                }
                             } else {
                                 warn!("[{}] Invalid CONNECT payload", sid);
-                                mux.send(
-                                    FrameType::ConnectErr,
-                                    sid,
-                                    b"invalid payload".to_vec(),
-                                ).await;
+                                mux.send(FrameType::ConnectErr, sid, b"invalid payload".to_vec())
+                                    .await;
                             }
                         }
                         FrameType::Data | FrameType::Close => {
@@ -194,7 +207,7 @@ pub async fn run_server(identity_path: Option<&str>) {
 }
 
 /// Handle a single proxied TCP session on the server side.
-async fn handle_server_session(
+async fn handle_server_tcp_session(
     sid: u32,
     host: String,
     port: u16,
@@ -206,7 +219,8 @@ async fn handle_server_session(
         Ok(s) => s,
         Err(e) => {
             warn!("[{}] Connection failed: {}", sid, e);
-            mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes()).await;
+            mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes())
+                .await;
             mux.drop_session(sid);
             return;
         }
@@ -217,5 +231,52 @@ async fn handle_server_session(
 
     // Data relay (shared implementation)
     relay_bidirectional(sid, stream, mux, session_rx).await;
-    info!("[{}] Closed", sid);
+    info!("[{}] TCP Closed", sid);
+}
+
+/// Handle a single proxied UDP session on the server side.
+async fn handle_server_udp_session(
+    sid: u32,
+    _host: String,
+    _port: u16,
+    mux: MuxHandle,
+    session_rx: mpsc::UnboundedReceiver<Frame>,
+) {
+    // Bind an ephemeral UDP socket on the exit server
+    let socket = match bind_udp_exit_socket().await {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("[{}] UDP socket bind failed: {}", sid, e);
+            mux.send(FrameType::ConnectErr, sid, e.to_string().into_bytes())
+                .await;
+            mux.drop_session(sid);
+            return;
+        }
+    };
+
+    // Signal success to the client
+    mux.send(FrameType::ConnectOk, sid, Vec::new()).await;
+
+    // Data relay (shared implementation)
+    relay_udp_server(sid, socket, mux, session_rx).await;
+    info!("[{}] UDP Closed", sid);
+}
+
+/// Prefer a dual-stack exit socket, retaining IPv4 on hosts without IPv6.
+pub(crate) async fn bind_udp_exit_socket() -> std::io::Result<UdpSocket> {
+    let dual_stack = (|| -> std::io::Result<UdpSocket> {
+        let socket = socket2::Socket::new(
+            socket2::Domain::IPV6,
+            socket2::Type::DGRAM,
+            Some(socket2::Protocol::UDP),
+        )?;
+        socket.set_only_v6(false)?;
+        socket.bind(&"[::]:0".parse::<std::net::SocketAddr>().unwrap().into())?;
+        socket.set_nonblocking(true)?;
+        UdpSocket::from_std(socket.into())
+    })();
+    match dual_stack {
+        Ok(socket) => Ok(socket),
+        Err(_) => UdpSocket::bind("0.0.0.0:0").await,
+    }
 }

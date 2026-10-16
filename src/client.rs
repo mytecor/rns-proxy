@@ -25,8 +25,8 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::mux::MuxHandle;
 use crate::{
-    create_node, encode_connect_payload, ensure_path, recall_sig_pub, relay_bidirectional, Frame,
-    FrameType, ProxyEvent,
+    create_node, encode_connect_payload, ensure_path, recall_sig_pub, relay_bidirectional,
+    relay_udp_client, Frame, FrameType, ProxyEvent,
 };
 
 /// Run the SOCKS5 client.
@@ -258,6 +258,11 @@ async fn handle_socks5_session(
     mux: MuxHandle,
     mut session_rx: mpsc::UnboundedReceiver<Frame>,
 ) {
+    let local_ip = stream
+        .local_addr()
+        .map(|a| a.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::LOCALHOST));
+
     // --- SOCKS5 handshake via fast-socks5 ---
     let proto = match Socks5ServerProtocol::accept_no_auth(stream).await {
         Ok(p) => p,
@@ -275,69 +280,153 @@ async fn handle_socks5_session(
         }
     };
 
-    // Only support TCP CONNECT
-    if cmd != Socks5Command::TCPConnect {
-        let _ = proto.reply_error(&ReplyError::CommandNotSupported).await;
-        return;
-    }
+    match cmd {
+        Socks5Command::TCPConnect => {
+            // Extract host and port from TargetAddr
+            let (host, port) = target_addr.into_string_and_port();
 
-    // Extract host and port from TargetAddr
-    let (host, port) = target_addr.into_string_and_port();
+            info!("[{}] TCP CONNECT -> {}:{}", sid, host, port);
 
-    info!("[{}] -> {}:{}", sid, host, port);
+            // Send CONNECT frame through RNS (is_udp = false)
+            let connect_payload = encode_connect_payload(&host, port, false);
+            mux.send(FrameType::Connect, sid, connect_payload).await;
 
-    // Send CONNECT frame through RNS
-    let connect_payload = encode_connect_payload(&host, port);
-    mux.send(FrameType::Connect, sid, connect_payload).await;
-
-    // Wait for CONN_OK or CONN_ERR with timeout
-    let connect_result = tokio::time::timeout(Duration::from_secs(15), async {
-        while let Some(frame) = session_rx.recv().await {
-            match frame.frame_type {
-                FrameType::ConnectOk => return Ok(()),
-                FrameType::ConnectErr => {
-                    let reason = String::from_utf8_lossy(&frame.payload).to_string();
-                    return Err(reason);
+            // Wait for CONN_OK or CONN_ERR with timeout
+            let connect_result = tokio::time::timeout(Duration::from_secs(15), async {
+                while let Some(frame) = session_rx.recv().await {
+                    match frame.frame_type {
+                        FrameType::ConnectOk => return Ok(()),
+                        FrameType::ConnectErr => {
+                            let reason = String::from_utf8_lossy(&frame.payload).to_string();
+                            return Err(reason);
+                        }
+                        _ => continue,
+                    }
                 }
-                _ => continue,
-            }
-        }
-        Err("channel closed".to_string())
-    })
-    .await;
+                Err("channel closed".to_string())
+            })
+            .await;
 
-    // Reply to SOCKS5 client based on RNS connection result
-    let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
+            // Reply to SOCKS5 client based on RNS connection result
+            let dummy_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 0);
 
-    let stream = match connect_result {
-        Ok(Ok(())) => {
-            // Connection succeeded -- send SOCKS5 success reply
-            match proto.reply_success(dummy_addr).await {
-                Ok(s) => s,
-                Err(e) => {
-                    debug!("[{}] Failed to send SOCKS5 reply: {}", sid, e);
-                    mux.send(FrameType::Close, sid, Vec::new()).await;
+            let stream = match connect_result {
+                Ok(Ok(())) => {
+                    // Connection succeeded -- send SOCKS5 success reply
+                    match proto.reply_success(dummy_addr).await {
+                        Ok(s) => s,
+                        Err(e) => {
+                            debug!("[{}] Failed to send SOCKS5 reply: {}", sid, e);
+                            mux.send(FrameType::Close, sid, Vec::new()).await;
+                            mux.drop_session(sid);
+                            return;
+                        }
+                    }
+                }
+                Ok(Err(reason)) => {
+                    warn!("[{}] Remote connect failed: {}", sid, reason);
+                    let _ = proto.reply_error(&ReplyError::GeneralFailure).await;
                     mux.drop_session(sid);
                     return;
                 }
-            }
-        }
-        Ok(Err(reason)) => {
-            warn!("[{}] Remote connect failed: {}", sid, reason);
-            let _ = proto.reply_error(&ReplyError::GeneralFailure).await;
-            mux.drop_session(sid);
-            return;
-        }
-        Err(_) => {
-            warn!("[{}] Connect timeout", sid);
-            let _ = proto.reply_error(&ReplyError::TtlExpired).await;
-            mux.drop_session(sid);
-            return;
-        }
-    };
+                Err(_) => {
+                    warn!("[{}] Connect timeout", sid);
+                    let _ = proto.reply_error(&ReplyError::TtlExpired).await;
+                    mux.drop_session(sid);
+                    return;
+                }
+            };
 
-    // Data relay (shared implementation)
-    relay_bidirectional(sid, stream, mux, session_rx).await;
+            // Data relay (shared implementation)
+            relay_bidirectional(sid, stream, mux, session_rx).await;
+        }
+        Socks5Command::UDPAssociate => {
+            let (host, port) = target_addr.into_string_and_port();
+
+            info!("[{}] UDP ASSOCIATE requested ({}:{})", sid, host, port);
+
+            let bind_ip = if local_ip.is_unspecified() {
+                IpAddr::V4(Ipv4Addr::LOCALHOST)
+            } else {
+                local_ip
+            };
+
+            let udp_socket = match tokio::net::UdpSocket::bind(SocketAddr::new(bind_ip, 0)).await {
+                Ok(s) => s,
+                Err(e) => {
+                    error!(
+                        "[{}] Failed to bind UDP relay socket on {}: {}",
+                        sid, bind_ip, e
+                    );
+                    let _ = proto.reply_error(&ReplyError::GeneralFailure).await;
+                    mux.drop_session(sid);
+                    return;
+                }
+            };
+
+            let relay_port = match udp_socket.local_addr() {
+                Ok(a) => a.port(),
+                Err(e) => {
+                    error!("[{}] Failed to get UDP local port: {}", sid, e);
+                    let _ = proto.reply_error(&ReplyError::GeneralFailure).await;
+                    mux.drop_session(sid);
+                    return;
+                }
+            };
+            let relay_addr = SocketAddr::new(bind_ip, relay_port);
+
+            // Send CONNECT frame through RNS (is_udp = true)
+            let connect_payload = encode_connect_payload(&host, port, true);
+            mux.send(FrameType::Connect, sid, connect_payload).await;
+
+            // Wait for CONN_OK or CONN_ERR with timeout
+            let connect_result = tokio::time::timeout(Duration::from_secs(15), async {
+                while let Some(frame) = session_rx.recv().await {
+                    match frame.frame_type {
+                        FrameType::ConnectOk => return Ok(()),
+                        FrameType::ConnectErr => {
+                            let reason = String::from_utf8_lossy(&frame.payload).to_string();
+                            return Err(reason);
+                        }
+                        _ => continue,
+                    }
+                }
+                Err("channel closed".to_string())
+            })
+            .await;
+
+            let stream = match connect_result {
+                Ok(Ok(())) => match proto.reply_success(relay_addr).await {
+                    Ok(s) => s,
+                    Err(e) => {
+                        debug!("[{}] Failed to send SOCKS5 UDP reply: {}", sid, e);
+                        mux.send(FrameType::Close, sid, Vec::new()).await;
+                        mux.drop_session(sid);
+                        return;
+                    }
+                },
+                Ok(Err(reason)) => {
+                    warn!("[{}] Remote UDP associate failed: {}", sid, reason);
+                    let _ = proto.reply_error(&ReplyError::GeneralFailure).await;
+                    mux.drop_session(sid);
+                    return;
+                }
+                Err(_) => {
+                    warn!("[{}] UDP associate timeout", sid);
+                    let _ = proto.reply_error(&ReplyError::TtlExpired).await;
+                    mux.drop_session(sid);
+                    return;
+                }
+            };
+
+            info!("[{}] UDP ASSOCIATE ready on {}", sid, relay_addr);
+            relay_udp_client(sid, udp_socket, stream, mux, session_rx).await;
+        }
+        _ => {
+            let _ = proto.reply_error(&ReplyError::CommandNotSupported).await;
+            mux.drop_session(sid);
+        }
+    }
 }
 
 /// Wait for a path to the server, then recall the identity and return sig_pub_bytes.

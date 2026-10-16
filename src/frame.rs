@@ -128,18 +128,24 @@ impl Frame {
 // CONNECT payload helpers
 // ---------------------------------------------------------------------------
 
-/// Build a CONNECT frame payload: `[1 byte host_len][host bytes][2 bytes port BE]`
-pub fn encode_connect_payload(host: &str, port: u16) -> Vec<u8> {
+/// Build a CONNECT frame payload: `[1 byte host_len][host bytes][2 bytes port BE][1 byte flags]`
+///
+/// Flags byte: bit 7 (0x80) indicates UDP when set, TCP when clear.
+pub fn encode_connect_payload(host: &str, port: u16, is_udp: bool) -> Vec<u8> {
     let h = host.as_bytes();
-    let mut buf = Vec::with_capacity(1 + h.len() + 2);
+    let mut buf = Vec::with_capacity(1 + h.len() + 2 + 1);
     buf.push(h.len() as u8);
     buf.extend_from_slice(h);
     buf.extend_from_slice(&port.to_be_bytes());
+    buf.push(if is_udp { 0x80 } else { 0x00 });
     buf
 }
 
-/// Parse a CONNECT frame payload. Returns `(host, port)`.
-pub fn decode_connect_payload(data: &[u8]) -> Option<(String, u16)> {
+/// Parse a CONNECT frame payload. Returns `(host, port, is_udp)`.
+///
+/// Backwards-compatible: if the flags byte is omitted (e.g. older clients or Python implementation),
+/// `is_udp` defaults to `false`.
+pub fn decode_connect_payload(data: &[u8]) -> Option<(String, u16, bool)> {
     if data.is_empty() {
         return None;
     }
@@ -149,7 +155,12 @@ pub fn decode_connect_payload(data: &[u8]) -> Option<(String, u16)> {
     }
     let host = String::from_utf8(data[1..1 + n].to_vec()).ok()?;
     let port = u16::from_be_bytes([data[1 + n], data[2 + n]]);
-    Some((host, port))
+    let is_udp = if data.len() > 1 + n + 2 {
+        (data[1 + n + 2] & 0x80) != 0
+    } else {
+        false
+    };
+    Some((host, port, is_udp))
 }
 
 #[cfg(test)]
@@ -198,11 +209,37 @@ mod tests {
     }
 
     #[test]
-    fn test_connect_payload_roundtrip() {
-        let payload = encode_connect_payload("example.com", 8080);
-        let (host, port) = decode_connect_payload(&payload).expect("decode should succeed");
+    fn test_connect_payload_roundtrip_tcp() {
+        let payload = encode_connect_payload("example.com", 8080, false);
+        let (host, port, is_udp) = decode_connect_payload(&payload).expect("decode should succeed");
         assert_eq!(host, "example.com");
         assert_eq!(port, 8080);
+        assert!(!is_udp);
+    }
+
+    #[test]
+    fn test_connect_payload_roundtrip_udp() {
+        let payload = encode_connect_payload("1.1.1.1", 53, true);
+        let (host, port, is_udp) = decode_connect_payload(&payload).expect("decode should succeed");
+        assert_eq!(host, "1.1.1.1");
+        assert_eq!(port, 53);
+        assert!(is_udp);
+    }
+
+    #[test]
+    fn test_connect_payload_backwards_compatible() {
+        // Legacy payload without flags byte: [1 byte host_len][host bytes][2 bytes port BE]
+        let mut legacy_payload = Vec::new();
+        let host = "legacy.org";
+        legacy_payload.push(host.len() as u8);
+        legacy_payload.extend_from_slice(host.as_bytes());
+        legacy_payload.extend_from_slice(&1080u16.to_be_bytes());
+
+        let (host_dec, port_dec, is_udp) =
+            decode_connect_payload(&legacy_payload).expect("decode should succeed");
+        assert_eq!(host_dec, "legacy.org");
+        assert_eq!(port_dec, 1080);
+        assert!(!is_udp);
     }
 
     #[test]
